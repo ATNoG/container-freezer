@@ -2,6 +2,8 @@
 
 Fork of [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer) (archived April 2023) that replaces the **cgroup freezer** with **CRIU checkpoint/restore** for full RAM reclamation on Multi-access Edge Computing (MEC) nodes.
 
+**Companion component:** [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) - the custom queue-proxy that detects idle containers and triggers freeze/thaw automatically.
+
 ## What Changed from the Original
 
 The original container-freezer uses the Linux cgroup freezer to pause container processes in place — they stop executing but remain in memory. This fork replaces that mechanism with [CRIU](https://criu.org/) (Checkpoint/Restore In Userspace), which:
@@ -114,12 +116,14 @@ Requires a Docker buildx builder named `mec-builder`:
 docker buildx create --name mec-builder --driver docker-container --use
 ```
 
-### 5. Enable in Knative Serving
+### 5. Deploy the queue-proxy plugin
 
-Patch the Knative deployment config to point to the freeze daemon:
+The [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) replaces Knative's stock queue-proxy with one that automatically freezes idle containers and thaws them on incoming requests. See its README for build and deployment instructions.
+
 ```bash
-kubectl patch configmap/config-deployment -n knative-serving \
-  --type merge -p '{"data":{"concurrencyStateEndpoint":"http://$HOST_IP:9696"}}'
+# Quick start (from the knative-freezer-plugin repo):
+./build.sh    # build and push the custom queue-proxy image
+./patch.sh    # patch Knative to use it
 ```
 
 ### 6. Activate on a Knative Service
@@ -183,6 +187,11 @@ config/              # Kubernetes manifests (RBAC, DaemonSet, ConfigMap)
 kyverno/             # Kyverno ClusterPolicy for restartPolicy injection
 benchmark-integration.sh  # Cold start vs CRIU restore benchmark
 ```
+
+## Related
+
+- [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) — custom queue-proxy with automatic freeze/thaw (companion component)
+- [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer) — original upstream repo (archived)
 
 ## License
 
