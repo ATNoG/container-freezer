@@ -1,0 +1,7 @@
+# Compiled binaries
+benchmark
+daemon
+freezer-daemon
+
+# Benchmark results
+criu_benchmark_*.csv

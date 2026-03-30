@@ -1,0 +1,30 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-container-restart-policy-never
+  annotations:
+    policies.kyverno.io/title: Inject restartPolicy Never on Knative user containers
+    policies.kyverno.io/description: >-
+      Knative Serving's field mask strips the per-container restartPolicy field
+      (ContainerRestartRules, k8s v1.34+). This policy injects restartPolicy: Never
+      on the user-container in Deployments created by Knative Serving, so that
+      kubelet does not restart the container after a CRIU checkpoint kills it.
+spec:
+  rules:
+    - name: set-restart-policy-never
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+              selector:
+                matchLabels:
+                  serving.knative.dev/service: "*"
+      mutate:
+        patchStrategicMerge:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: user-container
+                    restartPolicy: Never

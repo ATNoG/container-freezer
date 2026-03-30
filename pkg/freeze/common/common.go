@@ -4,19 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc"
-	cri "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 var ErrNoNonQueueProxyPods = errors.New("no non queue-proxy containers found in pod")
 
-func List(ctx context.Context, conn *grpc.ClientConn, podUID string) ([]string, error) {
+// List returns container IDs for a pod identified as "namespace/podName".
+func List(ctx context.Context, conn *grpc.ClientConn, podKey string) ([]string, error) {
+	parts := strings.SplitN(podKey, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("podKey must be namespace/podName, got: %s", podKey)
+	}
+	namespace, podName := parts[0], parts[1]
+
 	client := cri.NewRuntimeServiceClient(conn)
 	pods, err := client.ListPodSandbox(context.Background(), &cri.ListPodSandboxRequest{
 		Filter: &cri.PodSandboxFilter{
 			LabelSelector: map[string]string{
-				"io.kubernetes.pod.uid": podUID,
+				"io.kubernetes.pod.name":      podName,
+				"io.kubernetes.pod.namespace": namespace,
 			},
 		},
 	})
@@ -25,7 +34,7 @@ func List(ctx context.Context, conn *grpc.ClientConn, podUID string) ([]string, 
 	}
 
 	if len(pods.Items) == 0 {
-		return nil, fmt.Errorf("pod %s not found", podUID)
+		return nil, fmt.Errorf("pod %s not found", podKey)
 	}
 	pod := pods.Items[0]
 
@@ -36,12 +45,7 @@ func List(ctx context.Context, conn *grpc.ClientConn, podUID string) ([]string, 
 		return nil, err
 	}
 
-	containerIDs, err := lookupContainerIDs(ctrs)
-	if err != nil {
-		return nil, err
-	}
-
-	return containerIDs, nil
+	return lookupContainerIDs(ctrs)
 }
 
 func lookupContainerIDs(ctrs *cri.ListContainersResponse) ([]string, error) {

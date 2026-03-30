@@ -1,18 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/kelseyhightower/envconfig"
-
-	authv1 "k8s.io/api/authentication/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 
 	"knative.dev/container-freezer/pkg/daemon"
 	"knative.dev/container-freezer/pkg/freeze"
@@ -21,6 +15,7 @@ import (
 
 type config struct {
 	RuntimeType string `split_words:"true" required:"true"`
+	APIKey      string `split_words:"true"` // optional; if set, clients must send Authorization: Bearer <key>
 
 	// Logging configuration
 	FreezerLoggingConfig string `split_words:"true"`
@@ -28,7 +23,6 @@ type config struct {
 }
 
 func main() {
-	// Parse the environment.
 	var env config
 	if err := envconfig.Process("", &env); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -36,20 +30,8 @@ func main() {
 	}
 
 	logger, _ := pkglogging.NewLogger(env.FreezerLoggingConfig, env.FreezerLoggingLevel)
-	runtimeType := env.RuntimeType
 
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var freezeThaw daemon.FreezeThawer
-	freezeThaw, err = freeze.NewCRIProvider(runtimeType)
+	freezeThaw, err := freeze.NewCRIProvider(env.RuntimeType)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,16 +40,6 @@ func main() {
 		Freezer: freezeThaw,
 		Thawer:  freezeThaw,
 		Logger:  logger,
-		Validator: daemon.TokenValidatorFunc(func(ctx context.Context, token string) (*authv1.TokenReview, error) {
-			return clientset.AuthenticationV1().TokenReviews().Create(ctx, &authv1.TokenReview{
-				Spec: authv1.TokenReviewSpec{
-					Token: token,
-					Audiences: []string{
-						// The projected token only gives the right to pause/resume
-						"concurrency-state-hook",
-					},
-				},
-			}, metav1.CreateOptions{})
-		}),
+		APIKey:  env.APIKey,
 	})
 }
