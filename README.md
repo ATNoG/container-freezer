@@ -2,7 +2,7 @@
 
 Fork of [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer) (archived April 2023) that replaces the **cgroup freezer** with **CRIU checkpoint/restore** for full RAM reclamation on Multi-access Edge Computing (MEC) nodes.
 
-**Companion component:** [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) - the custom queue-proxy that detects idle containers and triggers freeze/thaw automatically.
+**Companion component:** [knative-freezer-plugin](https://github.com/ATNoG/knative-freezer-plugin) - the custom queue-proxy that detects idle containers and triggers freeze/thaw automatically.
 
 ## What Changed from the Original
 
@@ -118,7 +118,7 @@ docker buildx create --name mec-builder --driver docker-container --use
 
 ### 5. Deploy the queue-proxy plugin
 
-The [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) replaces Knative's stock queue-proxy with one that automatically freezes idle containers and thaws them on incoming requests. See its README for build and deployment instructions.
+The [knative-freezer-plugin](https://github.com/ATNoG/knative-freezer-plugin) replaces Knative's stock queue-proxy with one that automatically freezes idle containers and thaws them on incoming requests. See its README for build and deployment instructions.
 
 ```bash
 # Quick start (from the knative-freezer-plugin repo):
@@ -190,9 +190,9 @@ benchmark-integration.sh  # Cold start vs CRIU restore benchmark
 
 ## Related
 
-- [knative-freezer-plugin](https://github.com/pmacoutinho/knative-freezer-plugin) — custom queue-proxy with automatic freeze/thaw (companion component)
+- [knative-freezer-plugin](https://github.com/ATNoG/knative-freezer-plugin) — custom queue-proxy with automatic freeze/thaw (companion component)
 - [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer) — original upstream repo (archived)
 
 ## License
 
-See [LICENSE](LICENSE). Original work by the Knative Authors.
+This project is licensed under the [GNU General Public License v3.0](LICENSE). Original upstream work by the Knative Authors under the Apache License 2.0.
