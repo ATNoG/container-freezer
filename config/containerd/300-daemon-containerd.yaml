@@ -15,8 +15,6 @@ spec:
       serviceAccountName: freeze-tokenreview
       imagePullSecrets:
         - name: ghcr-pull-secret
-      nodeSelector:
-        kubernetes.io/arch: amd64
       containers:
         - name: daemon
           securityContext:
@@ -48,16 +46,21 @@ spec:
               hostPort: 9696
           volumeMounts:
             - name: containerd-socket
-              mountPath: /run/k3s/containerd/containerd.sock
+              mountPath: /run/k3s/containerd
             - name: pods-log
               mountPath: /var/log/pods
             - name: freezer-fifo
               mountPath: /run/freezer-fifo
+            - name: freezer-checkpoints
+              mountPath: /run/freezer-checkpoints
       volumes:
+        # Mount the containerd run directory (not the .sock file) so that a
+        # containerd restart, which recreates the socket as a new inode, is
+        # picked up live instead of stranding the daemon on a dead socket.
         - name: containerd-socket
           hostPath:
-            path: /run/k3s/containerd/containerd.sock
-            type: Socket
+            path: /run/k3s/containerd
+            type: Directory
         - name: pods-log
           hostPath:
             path: /var/log/pods
@@ -65,4 +68,8 @@ spec:
         - name: freezer-fifo
           hostPath:
             path: /run/freezer-fifo
+            type: DirectoryOrCreate
+        - name: freezer-checkpoints
+          hostPath:
+            path: /run/freezer-checkpoints
             type: DirectoryOrCreate
