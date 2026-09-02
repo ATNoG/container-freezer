@@ -1,0 +1,24 @@
+# Allows the freeze daemon to self-report checkpoint/restore capability by
+# patching a label onto its own node. Consumed by the MEC operator, which
+# enables checkpoint-based idling (freeze) only on labeled-capable nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: freeze-node-labeler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: freeze-node-labeler-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: freeze-node-labeler
+subjects:
+  - kind: ServiceAccount
+    name: freeze-tokenreview
+    namespace: knative-serving

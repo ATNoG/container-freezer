@@ -21,6 +21,10 @@ spec:
             runAsUser: 0
           image: ko://knative.dev/container-freezer/cmd/daemon
           env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: RUNTIME_TYPE
               value: "crio"
             - name: FREEZER_LOGGING_CONFIG
@@ -39,8 +43,17 @@ spec:
           volumeMounts:
             - name: crio-socket
               mountPath: /var/run/crio/crio.sock
+            # Read-only host root so the capability probe can stat the host's
+            # criu binary (the freeze path shells out to criu on the host).
+            - name: host-root
+              mountPath: /host
+              readOnly: true
       volumes:
         - name: crio-socket
           hostPath:
             path: /var/run/crio/crio.sock
             type: Socket
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
