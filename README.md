@@ -6,7 +6,7 @@ Fork of [knative-sandbox/container-freezer](https://github.com/knative-sandbox/c
 
 ## What Changed from the Original
 
-The original container-freezer uses the Linux cgroup freezer to pause container processes in place — they stop executing but remain in memory. This fork replaces that mechanism with [CRIU](https://criu.org/) (Checkpoint/Restore In Userspace), which:
+The original container-freezer uses the Linux cgroup freezer to pause container processes in place; they stop executing but remain in memory. This fork replaces that mechanism with [CRIU](https://criu.org/) (Checkpoint/Restore In Userspace), which:
 
 1. **Dumps full process state** (memory pages, file descriptors, TCP connections, CPU registers) to disk
 2. **Kills the process** to free all RAM
@@ -25,16 +25,20 @@ This is particularly useful for edge nodes with limited resources, where idle se
 | Post-restore logging | N/A | CRI-formatted log writer for `kubectl logs` |
 | Restart prevention | Not needed | Kyverno policy injects `restartPolicy: Never` |
 
-### Performance (retransmitter service, 46 iterations)
+### Performance
 
-| | Mean | Median | Stdev | Min | Max | P95 |
-|---|---|---|---|---|---|---|
-| **Cold Start** | 5258 ms | 5043 ms | 25425 ms* | 3827 ms | 177697 ms* | 8559 ms |
-| **CRIU Freeze** | 4389 ms | 4269 ms | 575 ms | 3267 ms | 5832 ms | 5373 ms |
-| **CRIU Restore** | 641 ms | 637 ms | 30 ms | 547 ms | 705 ms | 697 ms |
-| **Speedup** | **8.2x** | | | | | |
+Measured in the serverless-mec C-ITS evaluation:
 
-\*Cold start outlier at iteration 12 (177s, likely image pull). Restore is very consistent (~641ms ± 30ms).
+| Platform | Restore | Cold start | Speedup |
+|---|---|---|---|
+| x86 VM | ~731 ms | ~5978 ms | 8.2x |
+| ARM64 RSU (Cohda MK6) | ~10.9 s | ~25.6 s | 2.3x |
+
+Restore latency is dominated by disk I/O for the checkpoint image, so it improves with faster storage. The RSU figures are higher due to the constrained hardware.
+
+### Node capability detection
+
+Checkpoint/restore is not available on every node, so the daemon self-reports capability. At startup it probes the node (kernel `/proc/sys/kernel/ns_last_pid` plus a `criu` binary on the host, seen through a read-only host mount) and patches its own node with `mec.atnog.org/checkpoint-support=true|false`. The MEC operator reads this label and enables freeze only on capable nodes, so freeze-enabled applications degrade gracefully to standard cold starts elsewhere. This needs the node-labeler RBAC in `config/common/` and the `NODE_NAME` downward-API env, both included in the deployment manifests.
 
 ## Architecture
 
@@ -50,7 +54,7 @@ This is particularly useful for edge nodes with limited resources, where idle se
 │  Freeze Daemon (DaemonSet, one per node)        │
 │  pause  → containerd → runc → criu dump         │
 │  resume → containerd → runc → criu restore      │
-│                                                  │
+│                                                 │
 │  Post-restore IO: CRI log writer + shared FIFOs │
 └──────────────────────┬──────────────────────────┘
                        │
@@ -64,7 +68,7 @@ This is particularly useful for edge nodes with limited resources, where idle se
 ## Prerequisites
 
 - Kubernetes cluster with **containerd** runtime
-- **CRIU** installed on all worker nodes where checkpoint/restore will run (amd64 only)
+- **CRIU** installed on all worker nodes where checkpoint/restore will run (x86 and ARM64)
 - **Knative Serving** installed
 - **Kyverno** installed (for `restartPolicy: Never` injection)
 - Nodes labelled: `kubectl label node <node> knative.dev/container-runtime=containerd`
@@ -84,7 +88,7 @@ cd criu && make -j$(nproc) && sudo make install-criu
 sudo criu check --all
 ```
 
-> CRIU only works on amd64. ARM64 requires kernel recompilation.
+> On ARM64 (e.g. Cohda MK6 RSUs), build CRIU from source and ensure the kernel has `CONFIG_CHECKPOINT_RESTORE`. On such nodes the daemon checkpoints to a filesystem path (`/run/freezer-checkpoints`) instead of the containerd content store, working around overlay filesystems that lack xattr support on older kernels.
 
 ### 2. Deploy the freeze daemon
 
@@ -169,10 +173,10 @@ Outputs a CSV file with cold start, freeze, and restore times per iteration, plu
 
 ## Known Limitations
 
-- **Pod shows Error after restore**: Kubelet doesn't know the container was restored (CRIU operates below kubelet). The container is fully functional — only the status display is wrong. Fixing this requires the Container Checkpoint/Restore API (KEP-2008), still in alpha.
+- **Pod shows Error after restore**: Kubelet doesn't know the container was restored (CRIU operates below kubelet). The container is fully functional; only the status display is wrong. Fixing this requires the Container Checkpoint/Restore API (KEP-2008), still in alpha.
 - **`kubectl logs -f` doesn't follow after restore**: CRI considers the container terminated. Use `tail -f /var/log/pods/...` on the node for live log tracking.
 - **Checkpoints stored in daemon memory**: If the daemon pod restarts between freeze and thaw, the checkpoint reference is lost. The pod will need a cold start.
-- **amd64 only**: CRIU does not work on ARM64 without kernel recompilation.
+- **Per-node capability**: not every node can checkpoint. The daemon probes each node and labels it `mec.atnog.org/checkpoint-support=<bool>`; the MEC operator only enables freeze where it is `true`, falling back to cold starts elsewhere. ARM64 needs CRIU built from source and a kernel with `CONFIG_CHECKPOINT_RESTORE`.
 
 ## Project Structure
 
@@ -190,8 +194,8 @@ benchmark-integration.sh  # Cold start vs CRIU restore benchmark
 
 ## Related
 
-- [knative-freezer-plugin](https://github.com/ATNoG/knative-freezer-plugin) — custom queue-proxy with automatic freeze/thaw (companion component)
-- [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer) — original upstream repo (archived)
+- [knative-freezer-plugin](https://github.com/ATNoG/knative-freezer-plugin): custom queue-proxy with automatic freeze/thaw (companion component)
+- [knative-sandbox/container-freezer](https://github.com/knative-sandbox/container-freezer): original upstream repo (archived)
 
 ## License
 
