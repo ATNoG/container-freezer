@@ -26,6 +26,7 @@ import (
 	"syscall"
 
 	"github.com/containerd/continuity/sysx"
+	"golang.org/x/sys/unix"
 )
 
 // detectDirDiff returns diff dir options if a directory could
@@ -56,11 +57,11 @@ func compareSysStat(s1, s2 interface{}) (bool, error) {
 
 func compareCapabilities(p1, p2 string) (bool, error) {
 	c1, err := sysx.LGetxattr(p1, "security.capability")
-	if err != nil && err != sysx.ENODATA {
+	if err != nil && err != sysx.ENODATA && err != unix.ENOTSUP {
 		return false, fmt.Errorf("failed to get xattr for %s: %w", p1, err)
 	}
 	c2, err := sysx.LGetxattr(p2, "security.capability")
-	if err != nil && err != sysx.ENODATA {
+	if err != nil && err != sysx.ENODATA && err != unix.ENOTSUP {
 		return false, fmt.Errorf("failed to get xattr for %s: %w", p2, err)
 	}
 	return bytes.Equal(c1, c2), nil

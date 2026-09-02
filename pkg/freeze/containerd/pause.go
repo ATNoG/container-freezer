@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -25,6 +27,11 @@ const (
 	// CRIU restore. It must be the same path inside the daemon container
 	// and on the host so the containerd shim can open the FIFOs.
 	fifoDir = "/run/freezer-fifo"
+	// checkpointBaseDir is the host directory where CRIU checkpoint images
+	// are stored. Using a filesystem path instead of the containerd content
+	// store avoids the rootfs diff computation, which fails on overlay
+	// filesystems that do not support xattr (e.g. kernel <5.11).
+	checkpointBaseDir = "/run/freezer-checkpoints"
 )
 
 // criLogWriter formats container output in CRI log format
@@ -118,6 +125,9 @@ func (c *ContainerdCRI) List(ctx context.Context, podKey string) ([]string, erro
 // Pause creates a CRIU checkpoint of the container (saving full process state
 // to disk) and then kills the process to free RAM. The checkpoint is stored
 // in containerd's content store for later restore.
+// On arm64, where the overlay filesystem lacks xattr support (kernel <5.11),
+// checkpoint images are saved to a filesystem path instead, bypassing the
+// rootfs diff that requires xattr.
 // Flow: containerd → runc checkpoint → criu dump
 func (c *ContainerdCRI) Pause(ctx context.Context, containerID string) error {
 	nctx := namespaces.WithNamespace(ctx, "k8s.io")
@@ -130,20 +140,48 @@ func (c *ContainerdCRI) Pause(ctx context.Context, containerID string) error {
 		return fmt.Errorf("%s checkpoint failed: %v", containerID, err)
 	}
 
-	// Create CRIU checkpoint via containerd.
-	// This freezes the process, dumps its full state (memory, FDs, sockets,
-	// registers) to disk, then kills the process.
-	checkpoint, err := task.Checkpoint(nctx, withCheckpointOpenTcp())
+	if runtime.GOARCH == "arm64" {
+		return c.pauseImagePath(nctx, containerID, task)
+	}
+	return c.pauseContentStore(nctx, containerID, task)
+}
+
+// pauseContentStore checkpoints via the containerd content store (default).
+func (c *ContainerdCRI) pauseContentStore(ctx context.Context, containerID string, task containerd.Task) error {
+	checkpoint, err := task.Checkpoint(ctx, withCheckpointOpenTcp())
 	if err != nil {
 		return fmt.Errorf("%s checkpoint failed: %v", containerID, err)
 	}
 
-	// Store checkpoint reference for later restore.
 	c.checkpoints.Store(containerID, checkpoint)
 
-	// Delete the task to free RAM. After CRIU dump the process may already
-	// be dead; WithProcessKill ensures cleanup either way.
-	_, err = task.Delete(nctx, containerd.WithProcessKill)
+	_, err = task.Delete(ctx, containerd.WithProcessKill)
+	if err != nil {
+		return fmt.Errorf("%s kill after checkpoint failed: %v", containerID, err)
+	}
+
+	return nil
+}
+
+// pauseImagePath checkpoints to a filesystem path, skipping the rootfs diff
+// that fails on overlay filesystems without xattr support.
+func (c *ContainerdCRI) pauseImagePath(ctx context.Context, containerID string, task containerd.Task) error {
+	imgPath := filepath.Join(checkpointBaseDir, containerID)
+	if err := os.MkdirAll(imgPath, 0700); err != nil {
+		return fmt.Errorf("%s checkpoint failed to create dir: %v", containerID, err)
+	}
+
+	_, err := task.Checkpoint(ctx,
+		withCheckpointOpenTcp(),
+		containerd.WithCheckpointImagePath(imgPath),
+	)
+	if err != nil {
+		return fmt.Errorf("%s checkpoint failed: %v", containerID, err)
+	}
+
+	c.checkpoints.Store(containerID, imgPath)
+
+	_, err = task.Delete(ctx, containerd.WithProcessKill)
 	if err != nil {
 		return fmt.Errorf("%s kill after checkpoint failed: %v", containerID, err)
 	}
@@ -162,49 +200,67 @@ func (c *ContainerdCRI) Resume(ctx context.Context, containerID string) error {
 	if !ok {
 		return fmt.Errorf("%s has no checkpoint to restore from", containerID)
 	}
-	checkpoint := val.(containerd.Image)
 
 	ctr, err := c.ctrd.LoadContainer(nctx, containerID)
 	if err != nil {
 		return fmt.Errorf("%s restore failed: %v", containerID, err)
 	}
 
-	// Reconstruct the CRI log path from container labels and set up IO
-	// that formats output in CRI log format so kubectl logs works.
-	// FIFOs are created in fifoDir (a host-mounted path) so the containerd
-	// shim on the host can access them.
-	ioCreator := cio.NullIO
-	labels, err := ctr.Labels(nctx)
-	if err == nil {
-		podNs := labels["io.kubernetes.pod.namespace"]
-		podName := labels["io.kubernetes.pod.name"]
-		podUID := labels["io.kubernetes.pod.uid"]
-		ctrName := labels["io.kubernetes.container.name"]
-		if podNs != "" && podName != "" && podUID != "" && ctrName != "" {
-			logPath := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s/0.log",
-				podNs, podName, podUID, ctrName)
-			if f, ferr := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0640); ferr == nil {
-				mu := &sync.Mutex{}
-				ioCreator = cio.NewCreator(
-					cio.WithFIFODir(fifoDir),
-					cio.WithStreams(nil,
-						&criLogWriter{f: f, stream: "stdout", mu: mu},
-						&criLogWriter{f: f, stream: "stderr", mu: mu},
-					),
-				)
-			}
-		}
+	ioCreator := c.buildIOCreator(nctx, ctr)
+
+	// Restore from content store image or filesystem path depending on
+	// what Pause stored.
+	var restoreOpt containerd.NewTaskOpts
+	switch v := val.(type) {
+	case containerd.Image:
+		restoreOpt = containerd.WithTaskCheckpoint(v)
+	case string:
+		restoreOpt = containerd.WithRestoreImagePath(v)
+		defer os.RemoveAll(v)
+	default:
+		return fmt.Errorf("%s has invalid checkpoint type %T", containerID, val)
 	}
 
-	task, err := ctr.NewTask(nctx, ioCreator, containerd.WithTaskCheckpoint(checkpoint))
+	task, err := ctr.NewTask(nctx, ioCreator, restoreOpt)
 	if err != nil {
 		return fmt.Errorf("%s restore failed: %v", containerID, err)
 	}
 
-	// Start the restored process.
 	if err := task.Start(nctx); err != nil {
 		return fmt.Errorf("%s start after restore failed: %v", containerID, err)
 	}
 
 	return nil
+}
+
+// buildIOCreator reconstructs the CRI log path from container labels and
+// returns an IO creator that formats output in CRI log format so kubectl
+// logs works. FIFOs are created in fifoDir (a host-mounted path) so the
+// containerd shim on the host can access them.
+func (c *ContainerdCRI) buildIOCreator(ctx context.Context, ctr containerd.Container) cio.Creator {
+	labels, err := ctr.Labels(ctx)
+	if err != nil {
+		return cio.NullIO
+	}
+	podNs := labels["io.kubernetes.pod.namespace"]
+	podName := labels["io.kubernetes.pod.name"]
+	podUID := labels["io.kubernetes.pod.uid"]
+	ctrName := labels["io.kubernetes.container.name"]
+	if podNs == "" || podName == "" || podUID == "" || ctrName == "" {
+		return cio.NullIO
+	}
+	logPath := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s/0.log",
+		podNs, podName, podUID, ctrName)
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0640)
+	if err != nil {
+		return cio.NullIO
+	}
+	mu := &sync.Mutex{}
+	return cio.NewCreator(
+		cio.WithFIFODir(fifoDir),
+		cio.WithStreams(nil,
+			&criLogWriter{f: f, stream: "stdout", mu: mu},
+			&criLogWriter{f: f, stream: "stderr", mu: mu},
+		),
+	)
 }
